@@ -29,7 +29,12 @@ impl<'a> ReplayProcessor<'a> {
                 continue;
             }
 
-            let score_updates = self.goal_score_updates_from_frame(frame);
+            // The team score can be replicated a frame before the explosion
+            // (and the scored-on team after it): fall back on the last
+            // replicated scores rather than dropping the goal.
+            let score_updates = self
+                .goal_score_updates_from_frame(frame)
+                .or_else(|| self.replicated_goal_score_updates());
             let scoring_team_is_team_0 = self
                 .scoring_team_from_score_updates(score_updates)
                 .or_else(|| match self.get_scored_on_team_num() {
@@ -39,7 +44,16 @@ impl<'a> ReplayProcessor<'a> {
                 });
             let observed_scores = self
                 .goal_score_tuple_from_frame(frame)
-                .or_else(|| self.get_team_scores().ok());
+                .or_else(|| self.get_team_scores().ok())
+                .or_else(|| {
+                    let (team_zero, team_one) = score_updates?;
+                    let (previous_team_zero, previous_team_one) =
+                        self.last_known_goal_score_tuple();
+                    Some((
+                        team_zero.unwrap_or(previous_team_zero),
+                        team_one.unwrap_or(previous_team_one),
+                    ))
+                });
             let scorer = scoring_team_is_team_0.and_then(|team_is_team_0| {
                 self.goal_scorer_from_update(update, frame, team_is_team_0)
             });
@@ -164,6 +178,30 @@ impl<'a> ReplayProcessor<'a> {
 
         (team_zero_score.is_some() || team_one_score.is_some())
             .then_some((team_zero_score, team_one_score))
+    }
+
+    /// The goals of each team as last replicated (`Engine.TeamInfo:Score`),
+    /// whatever the frame, when they moved since the last goal event. A team
+    /// that has not scored has none.
+    fn replicated_goal_score_updates(&self) -> Option<(Option<i32>, Option<i32>)> {
+        let score = |is_team_0| {
+            let team_actor_id = self.get_team_actor_id_for_side(is_team_0).ok()?;
+            get_actor_attribute_matching!(
+                self,
+                &team_actor_id,
+                TEAM_INFO_SCORE_KEY,
+                boxcars::Attribute::Int
+            )
+            .ok()
+            .copied()
+        };
+        let (team_zero_score, team_one_score) = (score(true), score(false));
+        let previous = self.last_known_goal_score_tuple();
+        let moved = (
+            team_zero_score.unwrap_or(previous.0),
+            team_one_score.unwrap_or(previous.1),
+        ) != previous;
+        moved.then_some((team_zero_score, team_one_score))
     }
 
     fn scoring_team_from_score_updates(
