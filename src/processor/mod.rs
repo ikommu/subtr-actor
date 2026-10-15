@@ -549,6 +549,19 @@ impl<'a> ReplayProcessor<'a> {
         player_id: PlayerId,
         actor_id: boxcars::ActorId,
     ) {
+        // A player who disconnects and rejoins keeps their old replication info
+        // next to the new one, with the same unique id but no team. Replays
+        // recorded after the rejoin send both in every keyframe, the stale one
+        // last: keep the one on a team, or the player loses their side and car.
+        if let Some(existing_actor_id) = self.player_to_actor_id.get(&player_id) {
+            if *existing_actor_id != actor_id
+                && self.player_to_team.contains_key(existing_actor_id)
+                && !self.player_to_team.contains_key(&actor_id)
+            {
+                return;
+            }
+        }
+
         let stale_player_ids = self
             .player_to_actor_id
             .iter()
